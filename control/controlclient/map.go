@@ -9,6 +9,7 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"sync"
 
 	"inet.af/netaddr"
 	"tailscale.com/tailcfg"
@@ -71,11 +72,24 @@ func (ms *mapSession) addUserProfile(userID tailcfg.UserID) {
 	}
 }
 
+var (
+	// nodePool is for reusing node allocations in the controlclient after map updates.
+	nodePool = sync.Pool{
+		New: func() interface{} {
+			return &tailcfg.Node{}
+		},
+	}
+)
+
 // netmapForResponse returns a fully populated NetworkMap from a full
 // or incremental MapResponse within the session, filling in omitted
 // information from prior MapResponse values.
 func (ms *mapSession) netmapForResponse(resp *tailcfg.MapResponse) *netmap.NetworkMap {
 	undeltaPeers(resp, ms.previousPeers)
+
+	for _, v := range ms.previousPeers {
+		nodePool.Put(v)
+	}
 
 	ms.previousPeers = cloneNodes(resp.Peers) // defensive/lazy clone, since this escapes to who knows where
 	for _, up := range resp.UserProfiles {
@@ -123,7 +137,9 @@ func (ms *mapSession) netmapForResponse(resp *tailcfg.MapResponse) *netmap.Netwo
 	if resp.Node != nil {
 		ms.lastNode = resp.Node
 	}
-	if node := ms.lastNode.Clone(); node != nil {
+	if ms.lastNode != nil {
+		node := nodePool.Get().(*tailcfg.Node)
+		node = node.CloneFrom(ms.lastNode)
 		nm.SelfNode = node
 		nm.Expiry = node.KeyExpiry
 		nm.Name = node.Name
@@ -279,7 +295,8 @@ func cloneNodes(v1 []*tailcfg.Node) []*tailcfg.Node {
 	}
 	v2 := make([]*tailcfg.Node, len(v1))
 	for i, n := range v1 {
-		v2[i] = n.Clone()
+		node := nodePool.Get().(*tailcfg.Node)
+		v2[i] = node.CloneFrom(n)
 	}
 	return v2
 }
